@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
+	"time"
 )
 
 const (
-	GOOGLE_GEOCODE_BASE_URL = "https://maps.googleapis.com/maps/api/geocode/json?"
+	BASE_URL = "https://maps.googleapis.com/maps/api/geocode/json?"
 )
 
 var (
-	googleApiKey = ""
-	googleLang   = "en"
+	once     sync.Once
+	instance *requestProcessor
 
 	ErrZeroResults    = errors.New("zero results")
 	ErrOverLimit      = errors.New("over query limit")
@@ -22,6 +24,95 @@ var (
 	ErrInvalidRequest = errors.New("invalid request")
 	ErrUnknown        = errors.New("unkown error")
 )
+
+//Options contains all required data to create an instance of the request
+//processor singleton. Creating an instance with the Instance(..) method
+//and leaving the Options object uninitialized will use default options.
+type Options struct {
+	//ApiKey contains the api key for Google geocoding services.
+	//This key is not needed and may be omitted. However usage limits
+	//will then be enforced via IP.
+	//See: https://developers.google.com/maps/documentation/geocoding/get-api-key
+	ApiKey string
+
+	//Lang is the language used for the responses of the
+	//geocoding service. For a list of supported languages check:
+	//https://developers.google.com/maps/faq#languagesupport
+	//This library uses english(en) language and formatting as default.
+	Lang string
+
+	//There is a usage limit of 10 requests / second for the google
+	//geocoding api. This value usually should not be changed.
+	//See: https://developers.google.com/maps/documentation/geocoding/usage-limits
+	MaxQueriesPerSec int
+}
+
+//GetInstance is a stub method for creating an instance of the request
+//processor with default options. In case the singleton already exists
+//the instance will just be returned.
+func GetInstance() *requestProcessor {
+	return Instance(Options{})
+}
+
+//Instance creates a request processor instance or returns the instance
+//if it already exists. The Options object will only be used for creating
+//a new instance.
+func Instance(opts Options) *requestProcessor {
+	once.Do(func() {
+		instance = &requestProcessor{
+			apiKey:           opts.ApiKey,
+			lang:             "en",
+			maxQueriesPerSec: 10,
+		}
+		if opts.Lang != "" {
+			instance.lang = opts.Lang
+		}
+		if opts.MaxQueriesPerSec > 0 {
+			instance.maxQueriesPerSec = opts.MaxQueriesPerSec
+		}
+
+		//init the request throttling
+		instance.quit = make(chan int)
+		instance.throttle = make(chan int, instance.maxQueriesPerSec)
+		//allow requests for first time so we don't have to wait for the ticker period
+		instance.allowRequests()
+		instance.ticker = time.NewTicker(5 * time.Second)
+		go instance.multiTick()
+	})
+	return instance
+}
+
+func (r *requestProcessor) Destroy() {
+	close(r.quit)
+	close(r.throttle)
+}
+
+type requestProcessor struct {
+	apiKey           string
+	lang             string
+	maxQueriesPerSec int
+	throttle         chan int
+	quit             chan int
+	ticker           *time.Ticker
+}
+
+func (r *requestProcessor) allowRequests() {
+	for i := 0; i < r.maxQueriesPerSec; i++ {
+		r.throttle <- i
+	}
+}
+
+func (r *requestProcessor) multiTick() {
+	for {
+		select {
+		case <-r.quit:
+			r.ticker.Stop()
+			return
+		case <-r.ticker.C:
+			r.allowRequests()
+		}
+	}
+}
 
 //The following structs are for parsing the json response from
 //the google geocoding service.
@@ -59,32 +150,21 @@ type (
 	}
 )
 
-//SetGoogleApiKey sets the api key for Google geocoding services.
-//This key is not needed and may be omitted. Howevery usage limits
-//will then be enforced via IP.
-func SetGoogleApiKey(key string) {
-	googleApiKey = key
-}
-
-//SetGoogleLanguage sets the language for the responses of the
-//geocoding service. For a list of supported languages check:
-//https://developers.google.com/maps/faq#languagesupport
-//This library uses english(en) language and formatting as default.
-func SetGoogleLanguage(l string) {
-	googleLang = l
-}
-
-//GoogleGeocode returns a Location object for the given address string.
+//Geocode returns a Location object for the given address string.
 //The address string should be in the format used by the national
 //postal service of the country concerned.
-func GoogleGeocode(address string) (GResponse, error) {
+func (r *requestProcessor) Geocode(address string) (GResponse, error) {
 	response := GResponse{}
 
 	//query google service for a json response
-	url := GOOGLE_GEOCODE_BASE_URL +
+	url := BASE_URL +
 		"address=" + url.QueryEscape(address) +
-		"&language=" + googleLang +
-		"&key=" + googleApiKey
+		"&language=" + r.lang +
+		"&key=" + r.apiKey
+
+	//wait for throttling to give green light
+	<-r.throttle
+	//then send request
 	resp, err := http.Get(url)
 
 	if err != nil {
@@ -102,15 +182,15 @@ func GoogleGeocode(address string) (GResponse, error) {
 	case "OK":
 		break
 	case "ZERO_RESULTS":
-		return response, fmt.Errorf("google replied with error '%v' for address '%s'", ErrZeroResults, address)
+		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrZeroResults, address)
 	case "OVER_QUERY_LIMIT":
-		return response, fmt.Errorf("google replied with error '%v' for address '%s'", ErrOverLimit, address)
+		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrOverLimit, address)
 	case "REQUEST_DENIED":
-		return response, fmt.Errorf("google replied with error '%v' for address '%s'", ErrRequestDenied, address)
+		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrRequestDenied, address)
 	case "INVALID_REQUEST":
-		return response, fmt.Errorf("google replied with error '%v' for address '%s'", ErrInvalidRequest, address)
+		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrInvalidRequest, address)
 	case "UNKOWN_ERROR":
-		return response, fmt.Errorf("google replied with error '%v' for address '%s'", ErrUnknown, address)
+		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrUnknown, address)
 	}
 
 	return response, nil
