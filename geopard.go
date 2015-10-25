@@ -3,9 +3,9 @@ package geopard
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -97,7 +97,7 @@ type requestProcessor struct {
 }
 
 func (r *requestProcessor) allowRequests() {
-	for i := 0; i < r.maxQueriesPerSec; i++ {
+	for i := 1; i <= r.maxQueriesPerSec; i++ {
 		r.throttle <- i
 	}
 }
@@ -150,48 +150,64 @@ type (
 	}
 )
 
-//Geocode returns a Location object for the given address string.
-//The address string should be in the format used by the national
-//postal service of the country concerned.
-func (r *requestProcessor) Geocode(address string) (GResponse, error) {
+func (r *requestProcessor) processRequest(url string) (GResponse, error) {
 	response := GResponse{}
 
-	//query google service for a json response
-	url := BASE_URL +
-		"address=" + url.QueryEscape(address) +
-		"&language=" + r.lang +
-		"&key=" + r.apiKey
-
 	//wait for throttling to give green light
+	//this will block until there are 'free' slots for requests
 	<-r.throttle
 	//then send request
 	resp, err := http.Get(url)
 
 	if err != nil {
-		return response, fmt.Errorf("geocoding address '%s' failed with error '%v'", address, err)
+		return response, err
 	}
 
 	defer resp.Body.Close()
 
 	//parse json response into temporary struct
 	if err = json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return response, fmt.Errorf("parsing geocoding result for address '%s' failed with error '%v'", address, err)
+		return response, err
 	}
 
 	switch response.Status {
 	case "OK":
 		break
 	case "ZERO_RESULTS":
-		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrZeroResults, address)
+		return response, ErrZeroResults
 	case "OVER_QUERY_LIMIT":
-		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrOverLimit, address)
+		return response, ErrOverLimit
 	case "REQUEST_DENIED":
-		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrRequestDenied, address)
+		return response, ErrRequestDenied
 	case "INVALID_REQUEST":
-		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrInvalidRequest, address)
+		return response, ErrInvalidRequest
 	case "UNKOWN_ERROR":
-		return response, fmt.Errorf("service replied with error '%v' for address '%s'", ErrUnknown, address)
+		return response, ErrUnknown
 	}
 
 	return response, nil
+}
+
+//ReverseGeocode returns a GResponse object for the given latitude, longitude pair.
+//It contains all information offered by the google geocoding api.
+func (r *requestProcessor) ReverseGeocode(lat, lng float64) (GResponse, error) {
+	//query url
+	url := BASE_URL +
+		"latlng=" + strconv.FormatFloat(lat, 'f', 8, 64) + "," + strconv.FormatFloat(lng, 'f', 8, 64) +
+		"&language=" + r.lang +
+		"&key=" + r.apiKey
+
+	return r.processRequest(url)
+}
+
+//Geocode returns a GResponse object for the given address string.
+//It contains all information offered by the google geocoding api.
+func (r *requestProcessor) Geocode(address string) (GResponse, error) {
+	//query url
+	url := BASE_URL +
+		"address=" + url.QueryEscape(address) +
+		"&language=" + r.lang +
+		"&key=" + r.apiKey
+
+	return r.processRequest(url)
 }
