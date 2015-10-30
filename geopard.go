@@ -1,3 +1,5 @@
+// Package geopard is a slim and fast interface to the Google Geocoding API. It utilizes a singleton to enforce request rate limiting.
+
 package geopard
 
 import (
