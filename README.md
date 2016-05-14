@@ -6,7 +6,7 @@ See its [docs](https://developers.google.com/maps/documentation/geocoding/intro)
 You may use the Google geocoding API without an api key but then quota limits are enforced via IP.
 
 ### How to install
-	$ go get github.com/dbriemann/geopard
+	$ go get github.com/zensword/geopard
 
 ### Usage
 Geopard uses a singleton which can be instantiated as follows.
@@ -36,7 +36,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/dbriemann/geopard"
+	"github.com/zensword/geopard"
 )
 
 func main() {
@@ -78,7 +78,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dbriemann/geopard"
+	"github.com/zensword/geopard"
 )
 
 var (
